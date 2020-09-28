@@ -114,6 +114,7 @@ type Rule struct {
 	Alert       string            `yaml:"alert,omitempty"`
 	Expr        string            `yaml:"expr"`
 	For         model.Duration    `yaml:"for,omitempty"`
+	Resend		model.Duration    `yaml:"resend,omitempty"`
 	Labels      map[string]string `yaml:"labels,omitempty"`
 	Annotations map[string]string `yaml:"annotations,omitempty"`
 }
@@ -124,6 +125,7 @@ type RuleNode struct {
 	Alert       yaml.Node         `yaml:"alert,omitempty"`
 	Expr        yaml.Node         `yaml:"expr"`
 	For         model.Duration    `yaml:"for,omitempty"`
+	Resend		model.Duration    `yaml:"resend,omitempty"`
 	Labels      map[string]string `yaml:"labels,omitempty"`
 	Annotations map[string]string `yaml:"annotations,omitempty"`
 }

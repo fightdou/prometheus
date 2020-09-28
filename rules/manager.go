@@ -15,6 +15,7 @@ package rules
 
 import (
 	"context"
+	"github.com/prometheus/prometheus/models"
 	html_template "html/template"
 	"math"
 	"net/url"
@@ -476,6 +477,7 @@ func (g *Group) setEvaluationTimestamp(ts time.Time) {
 	g.mtx.Lock()
 	defer g.mtx.Unlock()
 	g.evaluationTimestamp = ts
+	g.evaluationTimestamp = ts
 }
 
 // evalTimestamp returns the immediately preceding consistently slotted evaluation time.
@@ -548,13 +550,15 @@ func (g *Group) CopyState(from *Group) {
 
 // Eval runs a single evaluation cycle in which all rules are evaluated sequentially.
 func (g *Group) Eval(ctx context.Context, ts time.Time) {
+// 遍历group中得告警规则
 	for i, rule := range g.rules {
 		select {
 		case <-g.done:
 			return
 		default:
 		}
-
+		
+		// 针对每条告警规则进行计算
 		func(i int, rule Rule) {
 			sp, ctx := opentracing.StartSpanFromContext(ctx, "rule")
 			sp.SetTag("name", rule.Name())
@@ -569,6 +573,7 @@ func (g *Group) Eval(ctx context.Context, ts time.Time) {
 
 			g.metrics.evalTotal.WithLabelValues(groupKey(g.File(), g.Name())).Inc()
 
+			// 调用alerting文件中得Eval进行每条规则状态得
 			vector, err := rule.Eval(ctx, ts, g.opts.QueryFunc, g.opts.ExternalURL)
 			if err != nil {
 				// Canceled queries are intentional termination of queries. This normally
@@ -1002,8 +1007,59 @@ func (m *Manager) LoadGroups(
 	interval time.Duration, externalLabels labels.Labels, filenames ...string,
 ) (map[string]*Group, []error) {
 	groups := make(map[string]*Group)
-
 	shouldRestore := !m.restored
+
+	var rName,rFn,rRules,rMath,rValues,rExpr string
+	rulelist,rerr := models.QueryRuleString()
+	if rerr != nil{
+		return nil, []error{rerr}
+	}
+	itv := interval
+	rules := make([]Rule, 0, rulelist.Len())
+	for e := rulelist.Front(); e != nil; e = e.Next(){
+		r := (e.Value).(models.RuleItem)
+		rName = r.Name
+		rFn = r.Fn
+		rRules = r.Rules
+		rMath = r.Math
+		rValues = r.Values
+		rExpr = rRules+rMath+rValues
+		expr, err := parser.ParseExpr(rExpr)
+		if err != nil {
+			return nil, []error{err}
+		}
+		if r.Interval != 0{
+			itv = time.Duration(r.Interval)
+		}
+		dur, derr := model.ParseDuration(r.For)
+		rur, derr := model.ParseDuration(r.Resend)
+		if derr != nil {
+			return nil, []error{err}
+		}
+		//构建AlertingRule实例并将其添加到rules中
+		rules = append(rules, NewAlertingRule(
+			r.Alert,
+			expr,
+			time.Duration(dur),
+			time.Duration(rur),
+			labels.FromMap(r.Labels),
+			labels.FromMap(r.Annotations),
+			externalLabels,
+			m.restored,
+			log.With(m.logger, "alert", r.Alert),
+		))
+	}
+	if len(rules) > 0 {
+		groups[groupKey(rName, rFn)] = NewGroup(GroupOptions{
+			Name: rName,
+			File: rFn,
+			Interval: itv,
+			Rules: rules,
+			ShouldRestore: shouldRestore,
+			Opts: m.opts,
+			done: m.done,
+			})
+	}
 
 	for _, fn := range filenames {
 		rgs, errs := m.opts.GroupLoader.Load(fn)
@@ -1029,6 +1085,7 @@ func (m *Manager) LoadGroups(
 						r.Alert.Value,
 						expr,
 						time.Duration(r.For),
+						time.Duration(r.Resend),
 						labels.FromMap(r.Labels),
 						labels.FromMap(r.Annotations),
 						externalLabels,

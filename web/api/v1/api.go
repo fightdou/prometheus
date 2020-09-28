@@ -1021,6 +1021,7 @@ type alertingRule struct {
 	Name           string           `json:"name"`
 	Query          string           `json:"query"`
 	Duration       float64          `json:"duration"`
+	Repeat         float64          `json:"repeat"`
 	Labels         labels.Labels    `json:"labels"`
 	Annotations    labels.Labels    `json:"annotations"`
 	Alerts         []*Alert         `json:"alerts"`
@@ -1083,6 +1084,7 @@ func (api *API) rules(r *http.Request) apiFuncResult {
 					Name:           rule.Name(),
 					Query:          rule.Query().String(),
 					Duration:       rule.HoldDuration().Seconds(),
+					Repeat:         rule.ReSendtime().Seconds(),
 					Labels:         rule.Labels(),
 					Annotations:    rule.Annotations(),
 					Alerts:         rulesAlertsToAPIAlerts(rule.ActiveAlerts()),

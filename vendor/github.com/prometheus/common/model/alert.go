@@ -16,6 +16,7 @@ package model
 import (
 	"fmt"
 	"time"
+
 )
 
 type AlertStatus string
@@ -36,6 +37,7 @@ type Alert struct {
 
 	// The known time range for this alert. Both ends are optional.
 	StartsAt     time.Time `json:"startsAt,omitempty"`
+	ReSend  	 time.Duration `json:"reSend,omitempty"`
 	EndsAt       time.Time `json:"endsAt,omitempty"`
 	GeneratorURL string    `json:"generatorURL"`
 }

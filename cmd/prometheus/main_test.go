@@ -32,6 +32,7 @@ import (
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/util/testutil"
+
 )
 
 var promPath = os.Args[0]
@@ -151,6 +152,7 @@ func TestSendAlerts(t *testing.T) {
 					Labels:       []labels.Label{{Name: "l1", Value: "v1"}},
 					Annotations:  []labels.Label{{Name: "a2", Value: "v2"}},
 					StartsAt:     time.Unix(2, 0),
+					LastSentAt:   time.Unix(2, 0),
 					EndsAt:       time.Unix(3, 0),
 					GeneratorURL: "http://localhost:9090/graph?g0.expr=up&g0.tab=1",
 				},
@@ -171,6 +173,7 @@ func TestSendAlerts(t *testing.T) {
 					Labels:       []labels.Label{{Name: "l1", Value: "v1"}},
 					Annotations:  []labels.Label{{Name: "a2", Value: "v2"}},
 					StartsAt:     time.Unix(2, 0),
+					LastSentAt:     time.Unix(2, 0),
 					EndsAt:       time.Unix(4, 0),
 					GeneratorURL: "http://localhost:9090/graph?g0.expr=up&g0.tab=1",
 				},

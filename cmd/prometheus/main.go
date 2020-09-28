@@ -21,7 +21,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	_ "net/http/pprof" // Comment this line to disable pprof endpoint.
 	"net/url"
 	"os"
 	"os/signal"
@@ -33,6 +32,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/prometheus/models"
+	_ "net/http/pprof" // Comment this line to disable pprof endpoint.
 	"github.com/alecthomas/units"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -49,9 +50,9 @@ import (
 	"go.uber.org/atomic"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 	"k8s.io/klog"
-
 	promlogflag "github.com/prometheus/common/promlog/flag"
 	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/models"
 	"github.com/prometheus/prometheus/discovery"
 	sd_config "github.com/prometheus/prometheus/discovery/config"
 	"github.com/prometheus/prometheus/notifier"
@@ -106,6 +107,7 @@ func main() {
 
 	cfg := struct {
 		configFile string
+		dbUrl	string
 
 		localStoragePath    string
 		notifier            notifier.Options
@@ -145,6 +147,9 @@ func main() {
 
 	a.Flag("config.file", "Prometheus configuration file path.").
 		Default("prometheus.yml").StringVar(&cfg.configFile)
+
+	a.Flag("mysql.url", "Mysql connection path.").
+		Default("root:123456@tcp(localhost:3306)/prometheus").StringVar(&cfg.dbUrl)
 
 	a.Flag("web.listen-address", "Address to listen on for UI, API, and telemetry.").
 		Default("0.0.0.0:9090").StringVar(&cfg.web.ListenAddress)
@@ -267,6 +272,7 @@ func main() {
 
 	logger := promlog.New(&cfg.promlogConfig)
 
+	models.Initialzation(cfg.dbUrl)
 	cfg.web.ExternalURL, err = computeExternalURL(cfg.prometheusURL, cfg.web.ListenAddress)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errors.Wrapf(err, "parse external URL %q", cfg.prometheusURL))
@@ -355,7 +361,11 @@ func main() {
 	)
 
 	var (
+		//ctxWeb用于跟踪控制对应的goroutine
+		//cancelWeb用于结束对应得goroutine
 		ctxWeb, cancelWeb = context.WithCancel(context.Background())
+		//context.Background方法回返回一个空的Context，这个空的Context一般被用于整个Context树得根节点，然后使用context.WithCancel(parent)函数创建一个可取消的子Context，
+		//将其当作参数传给goroutine使用，这样就可以使用这个子Context跟踪这个goroutine了。
 		ctxRule           = context.Background()
 
 		notifierManager = notifier.NewManager(&cfg.notifier, log.With(logger, "component", "notifier"))
@@ -379,7 +389,7 @@ func main() {
 		}
 
 		queryEngine = promql.NewEngine(opts)
-
+ 
 		ruleManager = rules.NewManager(&rules.ManagerOptions{
 			Appendable:      fanoutStorage,
 			Queryable:       localStorage,
@@ -910,14 +920,19 @@ func sendAlerts(s sender, externalURL string) rules.NotifyFunc {
 	return func(ctx context.Context, expr string, alerts ...*rules.Alert) {
 		var res []*notifier.Alert
 
+		// 数据转换，将rules.Alerts类型转换为notifier.Alert类型
 		for _, alert := range alerts {
+			//告警信息格式化
 			a := &notifier.Alert{
 				StartsAt:     alert.FiredAt,
+				ReSend:	      alert.ReSend,
 				Labels:       alert.Labels,
 				Annotations:  alert.Annotations,
 				GeneratorURL: externalURL + strutil.TableLinkForExpression(expr),
 			}
+			//判断告警是否结束
 			if !alert.ResolvedAt.IsZero() {
+				//设置告警结束时间
 				a.EndsAt = alert.ResolvedAt
 			} else {
 				a.EndsAt = alert.ValidUntil
@@ -926,6 +941,7 @@ func sendAlerts(s sender, externalURL string) rules.NotifyFunc {
 		}
 
 		if len(alerts) > 0 {
+			//发送告警
 			s.Send(res...)
 		}
 	}

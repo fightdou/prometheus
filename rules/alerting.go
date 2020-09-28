@@ -20,16 +20,13 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	html_template "html/template"
 
 	yaml "gopkg.in/yaml.v2"
-
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
-
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/rulefmt"
 	"github.com/prometheus/prometheus/pkg/timestamp"
@@ -93,15 +90,22 @@ type Alert struct {
 	ResolvedAt time.Time
 	LastSentAt time.Time
 	ValidUntil time.Time
+	ReSend     time.Duration
 }
 
+// 判断告警规则处于什么状态，返回值为bool类型
 func (a *Alert) needsSending(ts time.Time, resendDelay time.Duration) bool {
 	if a.State == StatePending {
 		return false
 	}
 
 	// if an alert has been resolved since the last send, resend it
+	// 如果自上次发送后警报已被解决，请重新发送它
 	if a.ResolvedAt.After(a.LastSentAt) {
+		return true
+	}
+
+	if a.FiredAt.After(a.LastSentAt) {
 		return true
 	}
 
@@ -117,6 +121,8 @@ type AlertingRule struct {
 	// The duration for which a labelset needs to persist in the expression
 	// output vector before an alert transitions from Pending to Firing state.
 	holdDuration time.Duration
+	// alert repeat notification
+	reSendtime time.Duration
 	// Extra labels to attach to the resulting alert sample vectors.
 	labels labels.Labels
 	// Non-identifying key/value pairs.
@@ -145,7 +151,7 @@ type AlertingRule struct {
 
 // NewAlertingRule constructs a new AlertingRule.
 func NewAlertingRule(
-	name string, vec parser.Expr, hold time.Duration,
+	name string, vec parser.Expr, hold time.Duration, resend time.Duration,
 	labels, annotations, externalLabels labels.Labels,
 	restored bool, logger log.Logger,
 ) *AlertingRule {
@@ -158,6 +164,7 @@ func NewAlertingRule(
 		name:           name,
 		vector:         vec,
 		holdDuration:   hold,
+		reSendtime:		resend,
 		labels:         labels,
 		annotations:    annotations,
 		externalLabels: el,
@@ -211,6 +218,10 @@ func (r *AlertingRule) HoldDuration() time.Duration {
 	return r.holdDuration
 }
 
+// reSendtime returns the resend duration of the alerting rule.
+func (r *AlertingRule) ReSendtime() time.Duration {
+	return r.reSendtime
+}
 // Labels returns the labels of the alerting rule.
 func (r *AlertingRule) Labels() labels.Labels {
 	return r.labels
@@ -296,6 +307,7 @@ const resolvedRetention = 15 * time.Minute
 
 // Eval evaluates the rule expression and then creates pending alerts and fires
 // or removes previously pending alerts accordingly.
+// Eval计算规则表达式，然后创建挂起的警报和触发或相应删除以前挂起的警报。
 func (r *AlertingRule) Eval(ctx context.Context, ts time.Time, query QueryFunc, externalURL *url.URL) (promql.Vector, error) {
 	res, err := query(ctx, r.vector.String(), ts)
 	if err != nil {
@@ -309,10 +321,12 @@ func (r *AlertingRule) Eval(ctx context.Context, ts time.Time, query QueryFunc, 
 
 	// Create pending alerts for any new vector elements in the alert expression
 	// or update the expression value for existing elements.
+	// 为警报表达式中的任何新向量元素创建挂起警报或更新现有元素的表达式值。
 	resultFPs := map[uint64]struct{}{}
 
 	var vec promql.Vector
 	var alerts = make(map[uint64]*Alert, len(res))
+	// 告警模板相关
 	for _, smpl := range res {
 		// Provide the alert information to the template.
 		l := make(map[string]string, len(smpl.Metric))
@@ -380,7 +394,7 @@ func (r *AlertingRule) Eval(ctx context.Context, ts time.Time, query QueryFunc, 
 			Value:       smpl.V,
 		}
 	}
-
+	// 检查标识标签集是否已经处于警报状态。如果是，更新最后一个值和注释，否则，创建一个新的警报条目
 	for h, a := range alerts {
 		// Check whether we already have alerting state for the identifying label set.
 		// Update the last value and annotations if so, create a new alert entry otherwise.
@@ -393,6 +407,8 @@ func (r *AlertingRule) Eval(ctx context.Context, ts time.Time, query QueryFunc, 
 		r.active[h] = a
 	}
 
+	// 检查是否有任何未执行的警报应该被移除或立即启动。写出警报timeseries。
+	// 警报状态 inactive-->pending-->firing
 	// Check if any pending alerts should be removed or fire now. Write out alert timeseries.
 	for fp, a := range r.active {
 		if _, ok := resultFPs[fp]; !ok {
@@ -408,9 +424,15 @@ func (r *AlertingRule) Eval(ctx context.Context, ts time.Time, query QueryFunc, 
 			continue
 		}
 
+		if a.State == StateFiring && ts.Sub(a.LastSentAt) >= r.reSendtime {
+			a.FiredAt = ts
+			a.ReSend = r.reSendtime
+		}
+
 		if a.State == StatePending && ts.Sub(a.ActiveAt) >= r.holdDuration {
 			a.State = StateFiring
 			a.FiredAt = ts
+			a.ReSend = r.reSendtime
 		}
 
 		if r.restored {
@@ -480,12 +502,17 @@ func (r *AlertingRule) ForEachActiveAlert(f func(*Alert)) {
 	}
 }
 
+// 发送告警通知
 func (r *AlertingRule) sendAlerts(ctx context.Context, ts time.Time, resendDelay time.Duration, interval time.Duration, notifyFunc NotifyFunc) {
 	alerts := []*Alert{}
+	// 对于激活告警得告警规则
 	r.ForEachActiveAlert(func(alert *Alert) {
+		// 根据当前告警状态进行判断
 		if alert.needsSending(ts, resendDelay) {
 			alert.LastSentAt = ts
+			
 			// Allow for two Eval or Alertmanager send failures.
+			// 允许两次Eval或Alertmanager发送失败。
 			delta := resendDelay
 			if interval > resendDelay {
 				delta = interval
@@ -503,6 +530,7 @@ func (r *AlertingRule) String() string {
 		Alert:       r.name,
 		Expr:        r.vector.String(),
 		For:         model.Duration(r.holdDuration),
+		Resend:		 model.Duration(r.reSendtime),
 		Labels:      r.labels.Map(),
 		Annotations: r.annotations.Map(),
 	}
@@ -538,6 +566,7 @@ func (r *AlertingRule) HTMLSnippet(pathPrefix string) html_template.HTML {
 		Alert:       fmt.Sprintf("<a href=%q>%s</a>", pathPrefix+strutil.TableLinkForExpression(alertMetric.String()), r.name),
 		Expr:        fmt.Sprintf("<a href=%q>%s</a>", pathPrefix+strutil.TableLinkForExpression(r.vector.String()), html_template.HTMLEscapeString(r.vector.String())),
 		For:         model.Duration(r.holdDuration),
+		Resend:      model.Duration(r.reSendtime),
 		Labels:      labelsMap,
 		Annotations: annotationsMap,
 	}
